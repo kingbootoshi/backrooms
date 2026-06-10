@@ -17,6 +17,18 @@ const restartBtn = document.getElementById("restart-btn") as HTMLButtonElement;
 
 let game: Game | null = null;
 let tapeUrl: string | null = null;
+let tapeExt = "webm";
+
+// phones get thumb-control instructions instead of WASD
+if (window.matchMedia("(pointer: coarse)").matches) {
+  const meta = document.querySelector(".tape-meta");
+  if (meta) {
+    meta.innerHTML =
+      "LEFT THUMB &mdash; move &nbsp;&middot;&nbsp; RIGHT THUMB &mdash; look<br />" +
+      "push the stick to its edge to run<br />" +
+      "headphones strongly recommended &mdash; your journey is recorded";
+  }
+}
 
 startBtn.addEventListener("click", () => {
   startOverlay.classList.add("hidden");
@@ -54,6 +66,15 @@ function onEnd(reason: EndReason, tape: Blob): void {
     endSub.textContent = "the tape made it out with you - watch your journey";
   }
 
+  // some mobile browsers refuse canvas capture - the run still ends cleanly,
+  // there is just no tape to show
+  if (tape.size === 0) {
+    replay.style.display = "none";
+    saveBtn.style.display = "none";
+    return;
+  }
+
+  tapeExt = tape.type.includes("mp4") ? "mp4" : "webm";
   tapeUrl = URL.createObjectURL(tape);
   replay.src = tapeUrl;
   void replay.play().catch(() => {
@@ -65,7 +86,7 @@ function onEnd(reason: EndReason, tape: Blob): void {
     const a = document.createElement("a");
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
     a.href = tapeUrl;
-    a.download = `backrooms-tape-${stamp}.webm`;
+    a.download = `backrooms-tape-${stamp}.${tapeExt}`;
     a.click();
   };
 }

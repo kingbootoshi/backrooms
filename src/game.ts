@@ -3,6 +3,7 @@ import { AudioEngine } from "./audio/audio";
 import { Stalker } from "./entity/stalker";
 import { Input } from "./player/input";
 import { Player } from "./player/player";
+import { TouchControls } from "./player/touch";
 import { Recorder } from "./recording/recorder";
 import { Osd, type OsdMode } from "./render/osd";
 import { PostFx } from "./render/postfx";
@@ -32,6 +33,9 @@ export class Game {
   private readonly recorder = new Recorder();
   private readonly hemi: THREE.HemisphereLight;
   private readonly fadePlane: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+
+  private readonly isTouch = window.matchMedia("(pointer: coarse)").matches;
+  private touch: TouchControls | null = null;
 
   private state: GameState = "playing";
   private paused = false;
@@ -90,19 +94,30 @@ export class Game {
     this.postfx.setSize(window.innerWidth, window.innerHeight);
 
     window.addEventListener("resize", () => this.onResize());
-    document.addEventListener("pointerlockchange", () => {
-      if (!document.pointerLockElement && this.state === "playing") this.paused = true;
-    });
-    // clicking the view always re-arms mouse look if it was ever dropped
-    this.renderer.domElement.addEventListener("click", () => {
-      if (this.state === "playing" && !document.pointerLockElement) this.requestPointer();
-    });
+    if (this.isTouch) {
+      // phones: on-screen thumb controls, no pointer lock, no pause loop
+      this.touch = new TouchControls(this.input, container);
+    } else {
+      document.addEventListener("pointerlockchange", () => {
+        if (!document.pointerLockElement && this.state === "playing") this.paused = true;
+      });
+      // clicking the view always re-arms mouse look if it was ever dropped
+      this.renderer.domElement.addEventListener("click", () => {
+        if (this.state === "playing" && !document.pointerLockElement) this.requestPointer();
+      });
+    }
   }
 
   /** Call from a user gesture: unlocks audio, starts the tape, locks pointer. */
   start(): void {
     this.audio.start();
-    this.recorder.start(this.renderer.domElement, this.audio.audioStream);
+    try {
+      // recording is a bonus, never a blocker - some mobile browsers
+      // refuse canvas capture and the run must still play
+      this.recorder.start(this.renderer.domElement, this.audio.audioStream);
+    } catch {
+      /* no tape on this device */
+    }
     this.requestPointer();
     this.clock.start();
     this.renderer.setAnimationLoop(() => this.tick());
@@ -110,7 +125,7 @@ export class Game {
 
   requestPointer(): void {
     this.paused = false;
-    this.renderer.domElement.requestPointerLock();
+    if (!this.isTouch) this.renderer.domElement.requestPointerLock();
   }
 
   get isPaused(): boolean {
@@ -254,6 +269,7 @@ export class Game {
   private async finish(reason: EndReason): Promise<void> {
     if (this.state === "ended") return;
     this.state = "ended";
+    this.touch?.setVisible(false);
     // hold the final frame on tape for a beat before cutting
     await delay(350);
     const tape = await this.recorder.stop();

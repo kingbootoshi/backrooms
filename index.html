@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
   <link rel="icon" href="data:," />
   <title>UNMARKED TAPE</title>
   <meta name="description" content="A found-footage horror experience. Every run is recorded to tape. The less you know, the better." />
@@ -16,10 +16,10 @@
   <meta name="twitter:description" content="A found-footage horror experience. Every run is recorded to tape. Headphones on. Lights off." />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
-    body { font-family: "Courier New", Courier, monospace; color: #e8e8e8; }
+    html, body { width: 100%; height: 100%; background: #000; overflow: hidden; overscroll-behavior: none; }
+    body { font-family: "Courier New", Courier, monospace; color: #e8e8e8; -webkit-tap-highlight-color: transparent; }
     #app { position: fixed; inset: 0; }
-    #app canvas { display: block; width: 100%; height: 100%; cursor: none; }
+    #app canvas { display: block; width: 100%; height: 100%; cursor: none; touch-action: none; }
 
     .overlay {
       position: fixed; inset: 0; display: flex; flex-direction: column;

@@ -1,23 +1,19 @@
 import * as THREE from "three";
+import type { StalkerSpec } from "../story/levels";
 import { CELL, Maze } from "../world/maze";
 
-type State = "dormant" | "stalking" | "chasing" | "cooldown";
+type State = "dormant" | "stalking" | "chasing" | "cooldown" | "apparition";
 
-const GRACE_PERIOD = 42; // seconds before first activity
-const HUNT_DURATION = 90; // active window per cycle
-const COOLDOWN = 26;
 const SIGHT_RANGE = 24;
 const KILL_RANGE = 1.05;
-const STALK_SPEED = 2.7;
-const CHASE_SPEED = 4.7;
-const WATCHED_FACTOR = 0.32; // it hates being seen
 const STRIDE = 1.0;
 
 /**
- * The other thing on the tape. Cycles between dormant, stalking (drifting
- * toward the player's general area), and chasing (direct BFS pursuit).
+ * The other thing on the tape. In "hunt" mode it cycles dormant -> stalking
+ * (drifting toward the player's general area) -> chasing (direct BFS pursuit).
  * Eye contact slows it; breaking line of sight is the player's only defense.
- * Aggression ramps the longer the tape runs.
+ * In "glimpse" mode it never hunts: it appears far off in the fog, stands
+ * facing you, and is gone when you get close. Some floors it only watches.
  */
 export class Stalker {
   readonly mesh: THREE.Group;
@@ -27,7 +23,7 @@ export class Stalker {
   killed = false;
 
   private state: State = "dormant";
-  private stateTimer = GRACE_PERIOD;
+  private stateTimer: number;
   private path: Array<{ x: number; z: number }> = [];
   private repathTimer = 0;
   private lostSightTimer = 0;
@@ -36,12 +32,18 @@ export class Stalker {
   private head!: THREE.Object3D;
   private headTwitchTarget = new THREE.Euler();
   private twitchTimer = 0;
+  private glimpsed = false;
 
   onStep: ((volume: number, pan: number) => void) | null = null;
+  onGlimpse: (() => void) | null = null;
 
-  constructor(private readonly maze: Maze) {
+  constructor(
+    private readonly maze: Maze,
+    private readonly spec: StalkerSpec,
+  ) {
     this.mesh = this.buildMesh();
     this.mesh.visible = false;
+    this.stateTimer = spec.grace;
   }
 
   update(
@@ -53,6 +55,11 @@ export class Stalker {
     this.elapsed += dt;
     this.stateTimer -= dt;
 
+    if (this.spec.mode === "glimpse") {
+      this.updateGlimpse(dt, playerPos);
+      return;
+    }
+
     switch (this.state) {
       case "dormant":
       case "cooldown":
@@ -62,6 +69,8 @@ export class Stalker {
       case "stalking":
       case "chasing":
         break;
+      case "apparition":
+        return; // hunt mode never enters apparition
     }
 
     const dx = playerPos.x - this.position.x;
@@ -99,8 +108,7 @@ export class Stalker {
 
     // being watched pins it down
     const toEntity = new THREE.Vector3(dx, 0, dz).normalize();
-    const watched =
-      hasLos && dist < 30 && cameraForward.dot(toEntity) > 0.58;
+    const watched = hasLos && dist < 30 && cameraForward.dot(toEntity) > 0.58;
 
     // pathing
     this.repathTimer -= dt;
@@ -117,8 +125,8 @@ export class Stalker {
 
     // movement along path
     const ramp = Math.min(1.3, (this.elapsed / 300) * 1.3); // slow aggression ramp
-    let speed = (this.state === "chasing" ? CHASE_SPEED + ramp : STALK_SPEED) ;
-    if (watched) speed *= WATCHED_FACTOR;
+    let speed = this.state === "chasing" ? this.spec.chaseSpeed + ramp : this.spec.stalkSpeed;
+    if (watched) speed *= this.spec.watchedFactor;
 
     if (this.path.length > 0) {
       const next = this.path[0];
@@ -162,6 +170,59 @@ export class Stalker {
     this.mesh.position.copy(this.position);
   }
 
+  // ---- glimpse mode ----------------------------------------------------------
+
+  /** It only watches. Appears far off with line of sight, vanishes up close. */
+  private updateGlimpse(dt: number, playerPos: THREE.Vector3): void {
+    if (this.state !== "apparition") {
+      this.threat = 0;
+      if (this.stateTimer <= 0) this.spawnApparition(playerPos);
+      return;
+    }
+
+    const dx = playerPos.x - this.position.x;
+    const dz = playerPos.z - this.position.z;
+    const dist = Math.hypot(dx, dz);
+    // face the player, perfectly still - the twitch does the rest
+    this.mesh.rotation.y = Math.atan2(dx, dz);
+    this.threat = 0.3;
+
+    if (dist < 9 || this.stateTimer <= 0) {
+      this.mesh.visible = false;
+      this.state = "dormant";
+      this.stateTimer = this.spec.cooldown + Math.random() * 18;
+      this.threat = 0;
+      return;
+    }
+    this.animate(dt);
+    this.mesh.position.copy(this.position);
+  }
+
+  private spawnApparition(playerPos: THREE.Vector3): void {
+    const playerCell = this.maze.worldToCell(playerPos.x, playerPos.z);
+    for (let i = 0; i < 60; i++) {
+      const cell = this.maze.randomFloorNear(playerCell, 4, 6);
+      if (!cell) continue;
+      const c = this.maze.cellCenter(cell);
+      if (!this.maze.hasLineOfSight(c.x, c.z, playerPos.x, playerPos.z)) continue;
+      const d = Math.hypot(c.x - playerPos.x, c.z - playerPos.z);
+      if (d < 12) continue; // never too close
+      this.position.set(c.x, 0, c.z);
+      this.mesh.position.copy(this.position);
+      this.mesh.visible = true;
+      this.state = "apparition";
+      this.stateTimer = 7;
+      if (!this.glimpsed) {
+        this.glimpsed = true;
+        this.onGlimpse?.();
+      }
+      return;
+    }
+    this.stateTimer = 6; // no valid spot - retry shortly
+  }
+
+  // ---- hunt mode internals ----------------------------------------------------
+
   private spawn(playerPos: THREE.Vector3): void {
     const playerCell = this.maze.worldToCell(playerPos.x, playerPos.z);
     // out of sight, beyond the fog line
@@ -174,7 +235,7 @@ export class Stalker {
       this.mesh.position.copy(this.position);
       this.mesh.visible = true;
       this.state = "stalking";
-      this.stateTimer = HUNT_DURATION;
+      this.stateTimer = this.spec.huntDuration;
       this.path = [];
       this.repathTimer = 0;
       return;
@@ -187,7 +248,7 @@ export class Stalker {
     this.mesh.visible = false;
     this.state = "cooldown";
     // cooldowns shrink as the tape runs on
-    this.stateTimer = Math.max(10, COOLDOWN - this.elapsed / 30);
+    this.stateTimer = Math.max(10, this.spec.cooldown - this.elapsed / 30);
     this.threat = 0;
   }
 

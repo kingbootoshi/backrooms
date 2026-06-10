@@ -7,42 +7,63 @@ import { TouchControls } from "./player/touch";
 import { Recorder } from "./recording/recorder";
 import { Osd, type OsdMode } from "./render/osd";
 import { PostFx } from "./render/postfx";
+import { FINALE_LINES, LEVELS, type LevelSpec, type ScriptLine } from "./story/levels";
 import { Maze } from "./world/maze";
 import { World } from "./world/world";
 
-type GameState = "playing" | "dying" | "winning" | "ended";
+type GameState = "playing" | "descending" | "dying" | "finale" | "ended";
 export type EndReason = "death" | "escape";
 
+const MONOLOGUE_CPS = 20; // finale typing speed, chars per second
+const MONOLOGUE_HOLD = 1.7; // seconds each finale line lingers after typing
+
 /**
- * Orchestrates one full run: world, player, the other thing, camcorder
- * post-chain, procedural audio, and the tape recording of all of it.
+ * Orchestrates one full descent: three levels on the same engine, the other
+ * thing, camcorder post-chain, procedural audio, the lines the tape types,
+ * and the recording of all of it - one continuous tape, top to bottom.
  */
 export class Game {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
   private readonly camera: THREE.PerspectiveCamera;
   private readonly clock = new THREE.Clock();
-  private readonly maze: Maze;
-  private readonly world: World;
-  private readonly player: Player;
-  private readonly stalker: Stalker;
   private readonly input = new Input();
   private readonly osd = new Osd();
   private readonly postfx: PostFx;
   private readonly audio: AudioEngine;
   private readonly recorder = new Recorder();
   private readonly hemi: THREE.HemisphereLight;
+  private readonly ambientLight: THREE.AmbientLight;
+  private readonly carry: THREE.PointLight;
   private readonly fadePlane: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
 
   private readonly isTouch = window.matchMedia("(pointer: coarse)").matches;
   private touch: TouchControls | null = null;
 
+  // level-owned objects, rebuilt on every descent
+  private maze!: Maze;
+  private world!: World;
+  private player!: Player;
+  private stalker!: Stalker;
+  private levelIndex = 0;
+  private level!: LevelSpec;
+  private levelElapsed = 0;
+  private scriptQueue: ScriptLine[] = [];
+
   private state: GameState = "playing";
   private paused = false;
   private elapsed = 0;
   private sequenceTimer = 0;
+  private descendLoaded = false;
   private flickerTimer = 3;
   private flickerLeft = 0;
+
+  // finale timeline, computed once
+  private finaleStarts: number[] = [];
+  private finaleRewindAt = 0;
+  private finaleEndAt = 0;
+  private finaleRewindPlayed = false;
+  private finaleEndPlayed = false;
 
   onEnd: ((reason: EndReason, tape: Blob) => void) | null = null;
 
@@ -58,27 +79,13 @@ export class Game {
 
     this.camera = new THREE.PerspectiveCamera(72, window.innerWidth / window.innerHeight, 0.1, 90);
 
-    // world
-    this.maze = new Maze((Math.random() * 0x7fffffff) | 0);
-    this.world = new World(this.maze);
-    this.scene.add(this.world.group);
-    this.scene.fog = new THREE.FogExp2(0x6e6234, 0.052);
-    this.scene.background = new THREE.Color(0x6e6234);
-
-    // lighting - one hemisphere + ambient + a dim carry-light at the player
+    // lighting rig - one hemisphere + ambient + a dim carry-light, retuned per level
     this.hemi = new THREE.HemisphereLight(0xfff3c4, 0x57492a, 1.05);
     this.scene.add(this.hemi);
-    this.scene.add(new THREE.AmbientLight(0xfff0c0, 0.35));
-    const carry = new THREE.PointLight(0xffeec0, 14, 16, 1.8);
-    carry.name = "carry";
-    this.scene.add(carry);
-
-    // actors
-    this.player = new Player(this.maze);
-    this.stalker = new Stalker(this.maze);
-    this.scene.add(this.stalker.mesh);
-    this.player.onFootstep = (v) => this.audio.footstep(v);
-    this.stalker.onStep = (v, pan) => this.audio.entityStep(v, pan);
+    this.ambientLight = new THREE.AmbientLight(0xfff0c0, 0.35);
+    this.scene.add(this.ambientLight);
+    this.carry = new THREE.PointLight(0xffeec0, 14, 16, 1.8);
+    this.scene.add(this.carry);
 
     // in-camera fade quad - end-of-tape fades are burned into the recording
     this.fadePlane = new THREE.Mesh(
@@ -92,6 +99,8 @@ export class Game {
 
     this.postfx = new PostFx(this.renderer, this.scene, this.camera, this.osd.texture);
     this.postfx.setSize(window.innerWidth, window.innerHeight);
+
+    this.loadLevel(0);
 
     window.addEventListener("resize", () => this.onResize());
     if (this.isTouch) {
@@ -132,16 +141,79 @@ export class Game {
     return this.paused;
   }
 
-  /** Dev/test escape hatch - jump straight to an ending sequence. */
+  /** Dev/test escape hatches. */
   forceEnd(reason: EndReason): void {
     if (this.state !== "playing") return;
-    this.state = reason === "death" ? "dying" : "winning";
-    this.sequenceTimer = 0;
     if (reason === "death") {
+      this.state = "dying";
+      this.sequenceTimer = 0;
       this.audio.deathSting();
       this.postfx.slamGlitch(1);
     } else {
-      this.audio.tapeEnd();
+      this.startFinale();
+    }
+  }
+
+  /** Dev/test: jump straight down one level. */
+  skipLevel(): void {
+    if (this.state !== "playing") return;
+    if (this.levelIndex < LEVELS.length - 1) this.startDescend();
+    else this.startFinale();
+  }
+
+  // ---- level loading -----------------------------------------------------------
+
+  private loadLevel(index: number): void {
+    // tear down the previous floor completely
+    if (this.world) {
+      this.scene.remove(this.world.group);
+      this.world.dispose();
+    }
+    if (this.stalker) this.scene.remove(this.stalker.mesh);
+
+    this.levelIndex = index;
+    this.level = LEVELS[index];
+    const spec = this.level;
+
+    this.maze = new Maze((Math.random() * 0x7fffffff) | 0, {
+      slabCount: spec.mazeSlabs,
+      pillarChance: spec.mazePillarChance,
+    });
+    this.world = new World(this.maze, spec.palette, spec.exitSignText);
+    this.scene.add(this.world.group);
+
+    this.scene.fog = new THREE.FogExp2(spec.palette.fogColor, spec.palette.fogDensity);
+    this.scene.background = new THREE.Color(spec.palette.fogColor);
+
+    this.hemi.color.set(spec.palette.hemiSky);
+    this.hemi.groundColor.set(spec.palette.hemiGround);
+    this.hemi.intensity = spec.palette.hemiIntensity;
+    this.ambientLight.color.set(spec.palette.ambientColor);
+    this.ambientLight.intensity = spec.palette.ambientIntensity;
+    this.carry.color.set(spec.palette.carryColor);
+    this.carry.intensity = spec.palette.carryIntensity;
+
+    this.player = new Player(this.maze);
+    this.stalker = new Stalker(this.maze, spec.stalker);
+    this.scene.add(this.stalker.mesh);
+    this.player.onFootstep = (v) => this.audio.footstep(v);
+    this.stalker.onStep = (v, pan) => this.audio.entityStep(v, pan);
+    if (spec.glimpseLine) {
+      const line = spec.glimpseLine;
+      this.stalker.onGlimpse = () => this.osd.showLine(line, 5);
+    }
+
+    this.audio.setBeds(spec.music, spec.ambient, spec.musicVol, spec.ambientVol);
+    this.osd.setDateBurn(spec.dateBurn, spec.freezeClock);
+
+    this.levelElapsed = 0;
+    this.scriptQueue = [...spec.script];
+    if (spec.descendLines) {
+      // typed over black while the next floor fades in
+      this.scriptQueue.unshift(
+        { at: 0.2, text: spec.descendLines[0], hold: 2.2 },
+        { at: 2.9, text: spec.descendLines[1] ?? "", hold: 2.2 },
+      );
     }
   }
 
@@ -154,14 +226,21 @@ export class Game {
 
     switch (this.state) {
       case "playing":
+        this.levelElapsed += simDt;
+        this.runScript();
         this.tickPlaying(simDt);
+        break;
+      case "descending":
+        this.levelElapsed += dt;
+        this.runScript();
+        this.tickDescending(dt);
         break;
       case "dying":
         this.tickDying(simDt);
         break;
-      case "winning":
-        this.tickWinning(simDt);
-        break;
+      case "finale":
+        this.tickFinale(dt);
+        return; // finale owns the OSD + render
       case "ended":
         return;
     }
@@ -170,18 +249,23 @@ export class Game {
     this.tickFlicker(simDt);
 
     // carry light follows the camera
-    const carry = this.scene.getObjectByName("carry");
-    carry?.position.copy(this.player.position).setY(this.player.position.y + 0.2);
+    this.carry.position.copy(this.player.position).setY(this.player.position.y + 0.2);
 
     this.audio.update(simDt, this.stalker.threat);
 
     let osdMode: OsdMode = "rec";
     if (this.paused) osdMode = "pause";
     if (this.state === "dying") osdMode = "lost";
-    if (this.state === "winning" && this.sequenceTimer > 0.9) osdMode = "end";
     this.osd.update(osdMode, this.elapsed);
 
     this.postfx.render(this.elapsed, dt);
+  }
+
+  private runScript(): void {
+    while (this.scriptQueue.length > 0 && this.scriptQueue[0].at <= this.levelElapsed) {
+      const line = this.scriptQueue.shift();
+      if (line && line.text) this.osd.showLine(line.text, line.hold);
+    }
   }
 
   private tickPlaying(dt: number): void {
@@ -215,12 +299,52 @@ export class Game {
     const dx = this.player.position.x - ex.x;
     const dz = this.player.position.z - ex.z;
     if (Math.hypot(dx, dz) < 1.5) {
-      this.state = "winning";
-      this.sequenceTimer = 0;
-      this.audio.tapeEnd();
-      document.exitPointerLock?.();
+      if (this.levelIndex < LEVELS.length - 1) {
+        this.startDescend();
+      } else {
+        this.startFinale();
+      }
     }
   }
+
+  // ---- the descent -------------------------------------------------------------
+
+  private startDescend(): void {
+    this.state = "descending";
+    this.sequenceTimer = 0;
+    this.descendLoaded = false;
+    this.osd.clearLine();
+    this.audio.doorSlam();
+    this.postfx.slamGlitch(0.85);
+  }
+
+  private tickDescending(dt: number): void {
+    this.sequenceTimer += dt;
+    const seq = this.sequenceTimer;
+
+    // slam to black, swap the world underneath, hold while the tape talks,
+    // then open the eyes one floor lower
+    if (seq < 0.5) {
+      this.fadePlane.material.opacity = Math.min(1, seq / 0.45);
+    } else if (!this.descendLoaded) {
+      this.descendLoaded = true;
+      this.fadePlane.material.opacity = 1;
+      this.loadLevel(this.levelIndex + 1);
+      this.postfx.setGlitch(0.25);
+    } else if (seq > 5.6) {
+      const t = (seq - 5.6) / 1.0;
+      this.fadePlane.material.opacity = Math.max(0, 1 - t);
+      if (t >= 1) {
+        this.fadePlane.material.opacity = 0;
+        this.postfx.setGlitch(0);
+        this.state = "playing";
+      }
+    }
+    this.player.applyToCamera(this.camera);
+    this.audio.update(dt, 0);
+  }
+
+  // ---- endings -------------------------------------------------------------
 
   private tickDying(dt: number): void {
     this.sequenceTimer += dt;
@@ -244,12 +368,60 @@ export class Game {
     if (this.sequenceTimer > 1.7) void this.finish("death");
   }
 
-  private tickWinning(dt: number): void {
+  private startFinale(): void {
+    this.state = "finale";
+    this.sequenceTimer = 0;
+    this.osd.clearLine();
+    this.audio.hushBeds();
+    document.exitPointerLock?.();
+    // timeline: fade to black, then each line types and lingers
+    let t = 1.4;
+    this.finaleStarts = FINALE_LINES.map((line) => {
+      const start = t;
+      t += line.length / MONOLOGUE_CPS + MONOLOGUE_HOLD;
+      return start;
+    });
+    this.finaleRewindAt = t + 0.4;
+    this.finaleEndAt = t + 2.9;
+  }
+
+  private tickFinale(dt: number): void {
     this.sequenceTimer += dt;
-    this.player.applyToCamera(this.camera);
-    this.fadePlane.material.opacity = Math.min(1, this.sequenceTimer / 1.2);
-    this.postfx.setGlitch(0.15);
-    if (this.sequenceTimer > 2.6) void this.finish("escape");
+    const seq = this.sequenceTimer;
+
+    this.fadePlane.material.opacity = Math.min(1, seq / 0.9);
+    this.postfx.setGlitch(0.12);
+
+    if (!this.finaleRewindPlayed && seq >= this.finaleRewindAt) {
+      this.finaleRewindPlayed = true;
+      this.audio.tapeRewind();
+    }
+    if (!this.finaleEndPlayed && seq >= this.finaleEndAt) {
+      this.finaleEndPlayed = true;
+      this.audio.tapeEnd();
+    }
+
+    if (seq >= this.finaleEndAt + 1.2) {
+      this.osd.update("end", this.elapsed);
+      this.postfx.render(this.elapsed, dt);
+      if (seq >= this.finaleEndAt + 3.2) void this.finish("escape");
+      return;
+    }
+
+    // which line is up?
+    let current = -1;
+    for (let i = 0; i < this.finaleStarts.length; i++) {
+      if (seq >= this.finaleStarts[i]) current = i;
+    }
+    if (current >= 0) {
+      const line = FINALE_LINES[current];
+      const chars = Math.floor((seq - this.finaleStarts[current]) * MONOLOGUE_CPS);
+      this.osd.drawMonologue(line, chars);
+    } else {
+      this.osd.drawMonologue("", 0);
+    }
+
+    this.postfx.render(this.elapsed, dt);
   }
 
   private tickFlicker(dt: number): void {
@@ -258,11 +430,12 @@ export class Game {
       this.flickerLeft = 0.08 + Math.random() * 0.22;
       this.flickerTimer = 3 + Math.random() * 7 - this.stalker.threat * 2.5;
     }
+    const base = this.level.palette.hemiIntensity;
     if (this.flickerLeft > 0) {
       this.flickerLeft -= dt;
-      this.hemi.intensity = 1.05 - Math.random() * 0.5;
+      this.hemi.intensity = base - Math.random() * base * 0.5;
     } else {
-      this.hemi.intensity += (1.05 - this.hemi.intensity) * Math.min(1, dt * 10);
+      this.hemi.intensity += (base - this.hemi.intensity) * Math.min(1, dt * 10);
     }
   }
 

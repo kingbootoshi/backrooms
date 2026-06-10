@@ -6,6 +6,10 @@ export type OsdMode = "rec" | "pause" | "lost" | "end";
  * Camcorder on-screen display, drawn to a 2D canvas and composited inside the
  * post shader - so every OSD pixel lands on the recorded tape, exactly like a
  * real camcorder burns its overlay into the footage.
+ *
+ * The OSD is also the narrator: showLine() types a line of text onto the
+ * tape, character by character, and the date burn can be overridden - the
+ * deeper the descent, the older the tape claims to be.
  */
 export class Osd {
   readonly texture: THREE.CanvasTexture;
@@ -13,6 +17,16 @@ export class Osd {
   private readonly ctx: CanvasRenderingContext2D;
   private lastDraw = -1;
   private battery = 100;
+
+  // narrator line state
+  private line = "";
+  private lineShownAt = 0;
+  private lineHold = 5;
+  private lineActive = false;
+
+  // date burn override - null shows the real date/time
+  private dateOverride: string | null = null;
+  private clockFrozen: string | null = null;
 
   constructor() {
     this.canvas = document.createElement("canvas");
@@ -25,10 +39,31 @@ export class Osd {
     this.texture.colorSpace = THREE.SRGBColorSpace;
   }
 
+  /** Type a line onto the tape. Replaces any line currently up. */
+  showLine(text: string, hold = 5): void {
+    this.line = text;
+    this.lineHold = hold;
+    this.lineActive = true;
+    this.lineShownAt = -1; // stamped with elapsed on next update
+  }
+
+  clearLine(): void {
+    this.lineActive = false;
+  }
+
+  /** Override the date burn (e.g. "OCT 07 2009"). null restores the real date. */
+  setDateBurn(date: string | null, freezeClock: boolean): void {
+    this.dateOverride = date;
+    if (freezeClock && !this.clockFrozen) {
+      this.clockFrozen = this.formatClock(new Date());
+    }
+    if (!freezeClock) this.clockFrozen = null;
+  }
+
   /** Redraws at ~12fps - the OSD only needs to tick, not render-rate update. */
   update(mode: OsdMode, elapsed: number): void {
     const frame = Math.floor(elapsed * 12);
-    if (frame === this.lastDraw && mode === "rec") return;
+    if (frame === this.lastDraw && mode === "rec" && !this.lineActive) return;
     this.lastDraw = frame;
     this.battery = Math.max(8, 100 - elapsed * 0.18);
 
@@ -84,20 +119,20 @@ export class Osd {
       ctx.fillRect(bx + 3, 57, (58 * this.battery) / 100, 22);
     }
 
-    // Timestamp (bottom-left) - real camcorder date burn
+    // Timestamp (bottom-left) - real camcorder date burn... usually
     ctx.textAlign = "left";
     const now = new Date();
-    const months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
-    const hh = now.getHours();
-    const ampm = hh >= 12 ? "PM" : "AM";
-    const h12 = hh % 12 === 0 ? 12 : hh % 12;
-    const mm = String(now.getMinutes()).padStart(2, "0");
-    ctx.fillText(
-      `${months[now.getMonth()]} ${String(now.getDate()).padStart(2, "0")} ${now.getFullYear()}`,
-      64,
-      h - 96,
-    );
-    ctx.fillText(`${ampm} ${h12}:${mm}`, 64, h - 56);
+    if (this.dateOverride) {
+      ctx.fillText(this.dateOverride, 64, h - 96);
+    } else {
+      const months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+      ctx.fillText(
+        `${months[now.getMonth()]} ${String(now.getDate()).padStart(2, "0")} ${now.getFullYear()}`,
+        64,
+        h - 96,
+      );
+    }
+    ctx.fillText(this.clockFrozen ?? this.formatClock(now), 64, h - 56);
 
     // Tape counter (bottom-right)
     ctx.textAlign = "right";
@@ -107,18 +142,52 @@ export class Osd {
     const frames = String(Math.floor((t % 1) * 24)).padStart(2, "0");
     ctx.fillText(`0:${min}:${sec}.${frames}`, w - 64, h - 56);
 
-    // Objective ticker for the first moments of tape
-    if (mode === "rec" && elapsed < 9) {
-      ctx.textAlign = "center";
-      ctx.font = "26px 'Courier New', monospace";
-      const msg = "> find the exit_";
-      const shown = msg.slice(0, Math.floor(Math.max(0, elapsed - 1.5) * 10));
-      ctx.globalAlpha = elapsed > 7.5 ? Math.max(0, 1 - (elapsed - 7.5) / 1.5) : 1;
-      ctx.fillText(shown, w / 2, h - 56);
-      ctx.globalAlpha = 1;
+    // Narrator line - typed onto the tape, center-bottom
+    if (this.lineActive) {
+      if (this.lineShownAt < 0) this.lineShownAt = elapsed;
+      const since = elapsed - this.lineShownAt;
+      const typeTime = this.line.length / 14; // 14 chars per second
+      const total = typeTime + this.lineHold;
+      if (since > total) {
+        this.lineActive = false;
+      } else {
+        ctx.textAlign = "center";
+        ctx.font = "26px 'Courier New', monospace";
+        const shown = this.line.slice(0, Math.floor(since * 14));
+        const fadeStart = total - 1.2;
+        ctx.globalAlpha = since > fadeStart ? Math.max(0, 1 - (since - fadeStart) / 1.2) : 1;
+        ctx.fillText(shown, w / 2, h - 56);
+        ctx.globalAlpha = 1;
+      }
     }
 
     this.texture.needsUpdate = true;
+  }
+
+  /** Centered big monologue line over black - the finale voice. */
+  drawMonologue(text: string, charsShown: number): void {
+    const { ctx, canvas } = this;
+    const w = canvas.width;
+    const h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+    ctx.shadowColor = "rgba(0,0,0,0.9)";
+    ctx.shadowBlur = 4;
+    ctx.strokeStyle = "#f0f0f0";
+    ctx.lineWidth = 3;
+    this.drawCorners(w, h);
+    ctx.fillStyle = "#f0f0f0";
+    ctx.textAlign = "center";
+    ctx.font = "32px 'Courier New', monospace";
+    ctx.fillText(text.slice(0, charsShown), w / 2, h / 2);
+    this.texture.needsUpdate = true;
+  }
+
+  private formatClock(d: Date): string {
+    const hh = d.getHours();
+    const ampm = hh >= 12 ? "PM" : "AM";
+    const h12 = hh % 12 === 0 ? 12 : hh % 12;
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    return `${ampm} ${h12}:${mm}`;
   }
 
   private drawCorners(w: number, h: number): void {

@@ -6,6 +6,10 @@
  * Files preload from the moment the module is constructed; decoding happens
  * once the AudioContext exists (user gesture). Playback degrades gracefully -
  * any sound not yet decoded simply stays silent for that trigger.
+ *
+ * Beds are level-aware: each floor of the descent crossfades to its own
+ * music + ambient loop. The tension loop rides above all of them, driven by
+ * threat.
  */
 
 // BASE_URL-aware so the game works at bootoshi.ai/backrooms/ and in dev alike.
@@ -15,6 +19,9 @@ const SOUNDS = {
   ambient: `${BASE}audio/ambient-room.mp3`,
   music: `${BASE}audio/music-bed.mp3`,
   tension: `${BASE}audio/tension.mp3`,
+  level2Music: `${BASE}audio/level2-music.mp3`,
+  level2Ambient: `${BASE}audio/level2-ambient.mp3`,
+  level3Music: `${BASE}audio/level3-music.mp3`,
   step1: `${BASE}audio/step1.mp3`,
   step2: `${BASE}audio/step2.mp3`,
   entityStep: `${BASE}audio/entity-step.mp3`,
@@ -23,14 +30,21 @@ const SOUNDS = {
   groan: `${BASE}audio/groan.mp3`,
   deathSting: `${BASE}audio/death-sting.mp3`,
   tapeEnd: `${BASE}audio/tape-end.mp3`,
+  doorSlam: `${BASE}audio/door-slam.mp3`,
+  tapeRewind: `${BASE}audio/tape-rewind.mp3`,
 } as const;
 
-type SoundName = keyof typeof SOUNDS;
+export type SoundName = keyof typeof SOUNDS;
 
 interface PlayOpts {
   gain?: number;
   pan?: number;
   rate?: number;
+}
+
+interface Loop {
+  src: AudioBufferSourceNode;
+  gain: GainNode;
 }
 
 export class AudioEngine {
@@ -43,9 +57,17 @@ export class AudioEngine {
   private readonly fetches = new Map<SoundName, Promise<ArrayBuffer>>();
   private readonly buffers = new Map<SoundName, AudioBuffer>();
 
-  private ambientGain!: GainNode;
-  private musicGain!: GainNode;
   private tensionGain!: GainNode;
+  private musicLoop: Loop | null = null;
+  private ambientLoop: Loop | null = null;
+  // beds requested before decode finishes start as soon as samples land
+  private pendingBeds: { music: SoundName; ambient: SoundName; musicVol: number; ambientVol: number } = {
+    music: "music",
+    ambient: "ambient",
+    musicVol: 0.3,
+    ambientVol: 0.55,
+  };
+  private decoded = false;
 
   private heartbeatTimer = 0;
   private ambientTimer = 16;
@@ -86,14 +108,8 @@ export class AudioEngine {
     limiter.connect(this.ctx.destination);
     limiter.connect(this.streamDest);
 
-    this.ambientGain = this.ctx.createGain();
-    this.musicGain = this.ctx.createGain();
     this.tensionGain = this.ctx.createGain();
-    this.ambientGain.gain.value = 0.55;
-    this.musicGain.gain.value = 0.3;
     this.tensionGain.gain.value = 0;
-    this.ambientGain.connect(this.master);
-    this.musicGain.connect(this.master);
     this.tensionGain.connect(this.master);
 
     void this.decodeAndStartBeds();
@@ -114,13 +130,49 @@ export class AudioEngine {
         }
       }),
     );
+    this.decoded = true;
     if (this.ending) return;
-    this.startLoop("ambient", this.ambientGain);
-    this.startLoop("music", this.musicGain);
-    this.startLoop("tension", this.tensionGain);
+    this.startLoopInto("tension", this.tensionGain);
+    const b = this.pendingBeds;
+    this.setBeds(b.music, b.ambient, b.musicVol, b.ambientVol, 0.8);
   }
 
-  private startLoop(name: SoundName, out: GainNode): void {
+  /** Crossfade the level beds. Safe to call before decode - it queues. */
+  setBeds(music: SoundName, ambient: SoundName, musicVol: number, ambientVol: number, fade = 2.2): void {
+    this.pendingBeds = { music, ambient, musicVol, ambientVol };
+    if (!this.started || !this.decoded || this.ending) return;
+    this.musicLoop = this.swapLoop(this.musicLoop, music, musicVol, fade);
+    this.ambientLoop = this.swapLoop(this.ambientLoop, ambient, ambientVol, fade);
+  }
+
+  private swapLoop(old: Loop | null, name: SoundName, vol: number, fade: number): Loop | null {
+    const t = this.ctx.currentTime;
+    if (old) {
+      old.gain.gain.setTargetAtTime(0, t, fade / 3);
+      const src = old.src;
+      setTimeout(() => {
+        try {
+          src.stop();
+        } catch {
+          /* already stopped */
+        }
+      }, fade * 1000 + 400);
+    }
+    const buf = this.buffers.get(name);
+    if (!buf) return null;
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    src.loop = true;
+    const gain = this.ctx.createGain();
+    gain.gain.value = 0;
+    gain.gain.setTargetAtTime(vol, t, fade / 3);
+    src.connect(gain);
+    gain.connect(this.master);
+    src.start();
+    return { src, gain };
+  }
+
+  private startLoopInto(name: SoundName, out: GainNode): void {
     const buf = this.buffers.get(name);
     if (!buf) return;
     const src = this.ctx.createBufferSource();
@@ -196,13 +248,23 @@ export class AudioEngine {
     this.play("entityStep", { gain: volume * 0.85, pan, rate: 0.95 + Math.random() * 0.1 });
   }
 
+  /** The descent: a rusted door booms shut somewhere above you. */
+  doorSlam(): void {
+    this.play("doorSlam", { gain: 0.85 });
+  }
+
+  /** Finale: the tape pulls itself backwards. */
+  tapeRewind(): void {
+    this.play("tapeRewind", { gain: 0.65 });
+  }
+
   deathSting(): void {
     if (!this.started) return;
     this.ending = true;
     this.play("deathSting", { gain: 0.95 });
     const t = this.ctx.currentTime;
-    this.ambientGain.gain.setTargetAtTime(0, t + 0.8, 0.25);
-    this.musicGain.gain.setTargetAtTime(0, t + 0.8, 0.25);
+    this.musicLoop?.gain.gain.setTargetAtTime(0, t + 0.8, 0.25);
+    this.ambientLoop?.gain.gain.setTargetAtTime(0, t + 0.8, 0.25);
     this.tensionGain.gain.setTargetAtTime(0, t + 0.8, 0.25);
   }
 
@@ -211,9 +273,18 @@ export class AudioEngine {
     if (!this.started) return;
     this.ending = true;
     const t = this.ctx.currentTime;
-    this.ambientGain.gain.setTargetAtTime(0, t, 0.6);
-    this.musicGain.gain.setTargetAtTime(0, t, 0.6);
+    this.musicLoop?.gain.gain.setTargetAtTime(0, t, 0.6);
+    this.ambientLoop?.gain.gain.setTargetAtTime(0, t, 0.6);
     this.tensionGain.gain.setTargetAtTime(0, t, 0.2);
     setTimeout(() => this.play("tapeEnd", { gain: 0.7 }), 1000);
+  }
+
+  /** Fade the beds for the finale monologue without ending the engine. */
+  hushBeds(): void {
+    if (!this.started || !this.decoded) return;
+    const t = this.ctx.currentTime;
+    this.musicLoop?.gain.gain.setTargetAtTime(0.06, t, 0.8);
+    this.ambientLoop?.gain.gain.setTargetAtTime(0.04, t, 0.8);
+    this.tensionGain.gain.setTargetAtTime(0, t, 0.4);
   }
 }

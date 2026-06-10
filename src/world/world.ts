@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import type { WorldPalette } from "../story/levels";
 import { CELL, Maze, SIZE, WALL_H } from "./maze";
 import { carpetTexture, ceilingTexture, wallpaperTexture } from "./textures";
 
@@ -7,19 +8,20 @@ import { carpetTexture, ceilingTexture, wallpaperTexture } from "./textures";
  *   1 floor plane + 1 ceiling plane + 1 instanced wall mesh +
  *   1 instanced light-panel mesh + the exit group.
  * Dense exponential fog hides the far field, so overdraw stays tiny.
+ * Palette-driven so every level of the descent reskins the same engine.
  */
 export class World {
   readonly group = new THREE.Group();
   readonly exitPosition: THREE.Vector3;
 
-  constructor(maze: Maze) {
+  constructor(maze: Maze, palette: WorldPalette, exitSignText: string) {
     const worldSize = SIZE * CELL;
 
     // Floor
     const floorGeo = new THREE.PlaneGeometry(worldSize, worldSize);
     const floor = new THREE.Mesh(
       floorGeo,
-      new THREE.MeshLambertMaterial({ map: carpetTexture(SIZE * 2) }),
+      new THREE.MeshLambertMaterial({ map: carpetTexture(palette, SIZE * 2) }),
     );
     floor.rotation.x = -Math.PI / 2;
     floor.position.set(worldSize / 2, 0, worldSize / 2);
@@ -28,7 +30,7 @@ export class World {
     // Ceiling
     const ceiling = new THREE.Mesh(
       floorGeo,
-      new THREE.MeshLambertMaterial({ map: ceilingTexture(SIZE * 2) }),
+      new THREE.MeshLambertMaterial({ map: ceilingTexture(palette, SIZE * 2) }),
     );
     ceiling.rotation.x = Math.PI / 2;
     ceiling.position.set(worldSize / 2, WALL_H, worldSize / 2);
@@ -42,7 +44,7 @@ export class World {
       }
     }
     const wallGeo = new THREE.BoxGeometry(CELL, WALL_H, CELL);
-    const wallMat = new THREE.MeshLambertMaterial({ map: wallpaperTexture(2, 1.6) });
+    const wallMat = new THREE.MeshLambertMaterial({ map: wallpaperTexture(palette, 2, 1.6) });
     const walls = new THREE.InstancedMesh(wallGeo, wallMat, wallCells.length);
     const m = new THREE.Matrix4();
     wallCells.forEach((c, i) => {
@@ -54,13 +56,14 @@ export class World {
 
     // Fluorescent panels - emissive-look quads on a sparse grid over floor cells
     const panelCells: Array<{ x: number; z: number }> = [];
+    const pe = palette.panelEvery;
     for (let z = 1; z < SIZE - 1; z++) {
       for (let x = 1; x < SIZE - 1; x++) {
-        if (!maze.isWall(x, z) && x % 3 === 1 && z % 3 === 1) panelCells.push({ x, z });
+        if (!maze.isWall(x, z) && x % pe === 1 && z % pe === 1) panelCells.push({ x, z });
       }
     }
     const panelGeo = new THREE.PlaneGeometry(2.2, 1.1);
-    const panelMat = new THREE.MeshBasicMaterial({ color: 0xfff7d8 });
+    const panelMat = new THREE.MeshBasicMaterial({ color: palette.panelColor });
     const panels = new THREE.InstancedMesh(panelGeo, panelMat, panelCells.length);
     const rot = new THREE.Matrix4().makeRotationX(Math.PI / 2);
     panelCells.forEach((c, i) => {
@@ -73,10 +76,24 @@ export class World {
     // The way out
     const exitCenter = maze.cellCenter(maze.exit);
     this.exitPosition = new THREE.Vector3(exitCenter.x, 0, exitCenter.z);
-    this.group.add(this.buildExit(maze));
+    this.group.add(this.buildExit(maze, exitSignText));
   }
 
-  private buildExit(maze: Maze): THREE.Group {
+  /** Frees every geometry, material, and canvas texture this level owns. */
+  dispose(): void {
+    this.group.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (mesh.geometry) mesh.geometry.dispose();
+      const mats = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
+      for (const mat of mats) {
+        const basic = mat as THREE.MeshBasicMaterial;
+        if (basic.map) basic.map.dispose();
+        mat.dispose();
+      }
+    });
+  }
+
+  private buildExit(maze: Maze, signText: string): THREE.Group {
     const g = new THREE.Group();
     const center = maze.cellCenter(maze.exit);
     const facing = maze.exitFacing;
@@ -108,7 +125,7 @@ export class World {
     frameR.position.x = 0.95;
     door.add(frameTop, frameL, frameR);
 
-    // EXIT sign - the one cold-green beacon in a warm-yellow world
+    // Sign - the one cold-green beacon, whatever it promises down here
     const sign = new THREE.Mesh(
       new THREE.PlaneGeometry(0.9, 0.32),
       new THREE.MeshBasicMaterial({ color: 0x33ff77 }),
@@ -126,7 +143,7 @@ export class World {
       sctx.textAlign = "center";
       sctx.textBaseline = "middle";
       sctx.fillStyle = "#4dff8f";
-      sctx.fillText("EXIT", 128, 52);
+      sctx.fillText(signText, 128, 52);
       const tex = new THREE.CanvasTexture(signCanvas);
       tex.colorSpace = THREE.SRGBColorSpace;
       (sign.material as THREE.MeshBasicMaterial).map = tex;

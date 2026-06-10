@@ -18,7 +18,7 @@ Open the URL it prints. Headphones on. Lights off.
 Your entire run is recorded. When the tape ends - however it ends - you can
 watch it back and save it as a `.webm` file.
 
-Every run generates a new layout.
+Every run generates a new layout. Not every exit is an exit.
 
 ## Tech
 

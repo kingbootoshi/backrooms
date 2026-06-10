@@ -18,15 +18,24 @@ export interface Cell {
  * reachable from spawn. Grid form keeps collision, line-of-sight, and
  * pathfinding O(1) per cell - the whole map is one Uint8Array.
  */
+export interface MazeOpts {
+  slabCount?: number;
+  pillarChance?: number;
+}
+
 export class Maze {
   readonly grid: Uint8Array;
   readonly spawn: Cell;
   readonly exit: Cell;
   readonly exitFacing: Cell; // direction the exit doorway faces (unit cell offset)
   private readonly rng: Rng;
+  private readonly slabCount: number;
+  private readonly pillarChance: number;
 
-  constructor(seed: number) {
+  constructor(seed: number, opts: MazeOpts = {}) {
     this.rng = mulberry32(seed);
+    this.slabCount = opts.slabCount ?? 430;
+    this.pillarChance = opts.pillarChance ?? 0.55;
     this.grid = new Uint8Array(SIZE * SIZE);
     this.generate();
     this.spawn = { x: SIZE >> 1, z: SIZE >> 1 };
@@ -133,7 +142,7 @@ export class Maze {
     }
     // Rectangular wall slabs - the partitions that carve the open plane into
     // corridors and dead-end rooms.
-    const slabCount = 430;
+    const slabCount = this.slabCount;
     for (let s = 0; s < slabCount; s++) {
       const horizontal = this.rng() < 0.5;
       const len = randInt(this.rng, 2, 9);
@@ -150,7 +159,7 @@ export class Maze {
     // Pillar field - lone columns in the open stretches.
     for (let z = 2; z < SIZE - 2; z++) {
       for (let x = 2; x < SIZE - 2; x++) {
-        if (x % 5 === 2 && z % 5 === 2 && this.rng() < 0.55) {
+        if (x % 5 === 2 && z % 5 === 2 && this.rng() < this.pillarChance) {
           g[z * SIZE + x] = WALL;
         }
       }

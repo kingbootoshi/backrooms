@@ -76,9 +76,24 @@
     #end-title.escape { color: #9c9; text-shadow: 0 0 18px rgba(153, 204, 153, 0.5); }
     #end-sub { font-size: 12px; color: #888; letter-spacing: 2px; }
     #replay {
-      width: min(76vw, 920px); aspect-ratio: 16 / 9; background: #050505;
+      width: min(76vw, 920px, calc(48vh * 16 / 9)); aspect-ratio: 16 / 9; background: #050505;
       border: 1px solid #333; outline: none;
     }
+
+    /* winners only - the way out pays */
+    #escape-reward {
+      display: flex; flex-direction: column; align-items: center; gap: 10px;
+      border: 1px solid #5a5430; background: rgba(110, 98, 52, 0.08);
+      padding: 16px 28px; max-width: 560px;
+    }
+    #escape-reward.hidden { display: none; }
+    .reward-word-label { font-size: 10px; letter-spacing: 4px; color: #777; }
+    #secret-word {
+      font-size: 24px; letter-spacing: 6px; color: #d8d2b8;
+      text-shadow: 0 0 14px rgba(216, 210, 184, 0.6);
+    }
+    .reward-copy { font-size: 11px; color: #999; letter-spacing: 1px; line-height: 1.7; }
+    a.btn { text-decoration: none; display: inline-block; }
     .end-buttons { display: flex; gap: 14px; }
     #pause-overlay { background: rgba(0, 0, 0, 0.82); }
   </style>
@@ -110,6 +125,19 @@
     <div id="end-title"></div>
     <div id="end-sub"></div>
     <video id="replay" controls playsinline></video>
+    <div id="escape-reward" class="hidden">
+      <div class="reward-word-label">SECRET WORD</div>
+      <div id="secret-word"></div>
+      <div class="reward-copy">
+        proof you got out. subscribe to the newsletter to enter the raffle &mdash;
+        one survivor wins a month of claude. extra entry: join the discord and
+        ping @kingbootoshi your secret word.
+      </div>
+      <div class="end-buttons">
+        <a class="btn" href="https://bootoshi.beehiiv.com/subscribe" target="_blank" rel="noopener noreferrer">ENTER THE RAFFLE</a>
+        <a class="btn secondary" href="https://discord.gg/shnvZhmtRG" target="_blank" rel="noopener noreferrer">EXTRA ENTRY &mdash; DISCORD</a>
+      </div>
+    </div>
     <div class="end-buttons">
       <button id="save-btn" class="btn">SAVE TAPE</button>
       <button id="restart-btn" class="btn secondary">NEW TAPE</button>

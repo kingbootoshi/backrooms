@@ -206,7 +206,7 @@ export class Game {
       this.sequenceTimer = 0;
       this.audio.deathSting();
       this.postfx.slamGlitch(1);
-      document.exitPointerLock();
+      document.exitPointerLock?.();
       return;
     }
 
@@ -218,7 +218,7 @@ export class Game {
       this.state = "winning";
       this.sequenceTimer = 0;
       this.audio.tapeEnd();
-      document.exitPointerLock();
+      document.exitPointerLock?.();
     }
   }
 

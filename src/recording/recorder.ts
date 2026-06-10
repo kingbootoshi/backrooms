@@ -34,14 +34,28 @@ export class Recorder {
   async stop(): Promise<Blob> {
     const raw = await new Promise<Blob>((resolve) => {
       const rec = this.recorder;
+      const settle = () => resolve(new Blob(this.chunks, { type: this.mimeType || "video/webm" }));
       if (!rec || rec.state === "inactive") {
-        resolve(new Blob(this.chunks, { type: this.mimeType || "video/webm" }));
+        settle();
         return;
       }
+      // Safari (especially iOS) can drop onstop entirely - the ending must
+      // never hang on the recorder. Settle with whatever chunks exist.
+      const failsafe = setTimeout(settle, 3000);
       rec.onstop = () => {
-        resolve(new Blob(this.chunks, { type: this.mimeType || "video/webm" }));
+        clearTimeout(failsafe);
+        settle();
       };
-      rec.stop();
+      rec.onerror = () => {
+        clearTimeout(failsafe);
+        settle();
+      };
+      try {
+        rec.stop();
+      } catch {
+        clearTimeout(failsafe);
+        settle();
+      }
     });
     if (!raw.type.includes("webm")) return raw;
     const durationMs = performance.now() - this.startedAt;

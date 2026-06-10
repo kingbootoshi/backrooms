@@ -14,6 +14,11 @@ const endSub = document.getElementById("end-sub") as HTMLElement;
 const replay = document.getElementById("replay") as HTMLVideoElement;
 const saveBtn = document.getElementById("save-btn") as HTMLButtonElement;
 const restartBtn = document.getElementById("restart-btn") as HTMLButtonElement;
+const escapeReward = document.getElementById("escape-reward") as HTMLElement;
+const secretWordEl = document.getElementById("secret-word") as HTMLElement;
+
+// winners ping one of these at @kingbootoshi - unmistakable proof they got out
+const SECRET_WORDS = ["ALMONDWATER", "CARPETJUICE", "DRYWALLMILK", "HUMMINGYELLOW", "MOISTCEILING"];
 
 let game: Game | null = null;
 let tapeUrl: string | null = null;
@@ -64,6 +69,8 @@ function onEnd(reason: EndReason, tape: Blob): void {
     endTitle.textContent = "YOU GOT OUT";
     endTitle.className = "escape";
     endSub.textContent = "the tape made it out with you - watch your journey";
+    secretWordEl.textContent = SECRET_WORDS[Math.floor(Math.random() * SECRET_WORDS.length)];
+    escapeReward.classList.remove("hidden");
   }
 
   // some mobile browsers refuse canvas capture - the run still ends cleanly,

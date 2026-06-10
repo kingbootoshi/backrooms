@@ -7,6 +7,8 @@ import { TouchControls } from "./player/touch";
 import { Recorder } from "./recording/recorder";
 import { Osd, type OsdMode } from "./render/osd";
 import { PostFx } from "./render/postfx";
+import { GhostPlayback, type GhostTape } from "./replay/ghost";
+import { GhostHud } from "./replay/hud";
 import { FINALE_LINES, LEVELS, type LevelSpec, type ScriptLine } from "./story/levels";
 import { Maze } from "./world/maze";
 import { World } from "./world/world";
@@ -16,6 +18,13 @@ export type EndReason = "death" | "escape";
 
 const MONOLOGUE_CPS = 20; // finale typing speed, chars per second
 const MONOLOGUE_HOLD = 1.7; // seconds each finale line lingers after typing
+
+/** The tape's closing words when the runner was never human. */
+const GHOST_FINALE_LINES: string[] = [
+  "this tape was not held by human hands.",
+  "sixty million attempts are on it.",
+  "it learned to run.",
+];
 
 /**
  * Orchestrates one full descent: three levels on the same engine, the other
@@ -64,11 +73,23 @@ export class Game {
   private finaleEndAt = 0;
   private finaleRewindPlayed = false;
   private finaleEndPlayed = false;
+  private finaleLines: string[] = FINALE_LINES;
+
+  // ghost replay - the RL agent's recorded run, driven instead of input
+  private readonly ghost: GhostPlayback | null = null;
+  private readonly ghostTape: GhostTape | null = null;
+  private ghostHud: GhostHud | null = null;
 
   onEnd: ((reason: EndReason, tape: Blob) => void) | null = null;
 
-  constructor(container: HTMLElement, audio: AudioEngine) {
+  constructor(container: HTMLElement, audio: AudioEngine, ghostTape: GhostTape | null = null) {
     this.audio = audio;
+    if (ghostTape) {
+      this.ghostTape = ghostTape;
+      this.ghost = new GhostPlayback(ghostTape);
+      this.ghostHud = new GhostHud(ghostTape);
+      this.finaleLines = GHOST_FINALE_LINES;
+    }
     this.renderer = new THREE.WebGLRenderer({
       antialias: false,
       powerPreference: "high-performance",
@@ -100,10 +121,12 @@ export class Game {
     this.postfx = new PostFx(this.renderer, this.scene, this.camera, this.osd.texture);
     this.postfx.setSize(window.innerWidth, window.innerHeight);
 
-    this.loadLevel(0);
+    this.loadLevel(this.ghostTape ? levelIndexByName(this.ghostTape.level) : 0);
 
     window.addEventListener("resize", () => this.onResize());
-    if (this.isTouch) {
+    if (this.ghost) {
+      // ghost runs need no input and no pointer lock - the tape drives
+    } else if (this.isTouch) {
       // phones: on-screen thumb controls, no pointer lock, no pause loop
       this.touch = new TouchControls(this.input, container);
     } else {
@@ -134,7 +157,7 @@ export class Game {
 
   requestPointer(): void {
     this.paused = false;
-    if (!this.isTouch) this.renderer.domElement.requestPointerLock();
+    if (!this.isTouch && !this.ghost) this.renderer.domElement.requestPointerLock();
   }
 
   get isPaused(): boolean {
@@ -175,7 +198,9 @@ export class Game {
     this.level = LEVELS[index];
     const spec = this.level;
 
-    this.maze = new Maze((Math.random() * 0x7fffffff) | 0, {
+    // ghost tapes carry the seed of the maze the agent actually ran -
+    // the generator is parity-tested, so this rebuilds its exact world
+    this.maze = new Maze(this.ghostTape ? this.ghostTape.seed : (Math.random() * 0x7fffffff) | 0, {
       slabCount: spec.mazeSlabs,
       pillarChance: spec.mazePillarChance,
     });
@@ -269,6 +294,10 @@ export class Game {
   }
 
   private tickPlaying(dt: number): void {
+    if (this.ghost) {
+      this.tickGhost(dt);
+      return;
+    }
     if (!this.paused) {
       this.player.update(dt, this.input);
     }
@@ -302,6 +331,32 @@ export class Game {
       if (this.levelIndex < LEVELS.length - 1) {
         this.startDescend();
       } else {
+        this.startFinale();
+      }
+    }
+  }
+
+  // ---- ghost replay ------------------------------------------------------------
+
+  /** The tape drives: camera and entity follow the RL agent's recorded run. */
+  private tickGhost(dt: number): void {
+    const ghost = this.ghost as GhostPlayback;
+    const frame = ghost.sample(this.levelElapsed);
+
+    this.player.ghostMove(frame.x, frame.z, frame.yaw, dt);
+    this.player.applyToCamera(this.camera);
+    this.stalker.ghostSet(frame.sx, frame.sz, frame.sactive, this.player.position, dt);
+    this.postfx.setGlitch(this.stalker.threat * 0.5);
+    this.ghostHud?.update(frame);
+
+    if (this.levelElapsed >= ghost.duration) {
+      if (ghost.outcome === "death") {
+        this.state = "dying";
+        this.sequenceTimer = 0;
+        this.audio.deathSting();
+        this.postfx.slamGlitch(1);
+      } else {
+        // win or timeout - the tape ends either way
         this.startFinale();
       }
     }
@@ -376,7 +431,7 @@ export class Game {
     document.exitPointerLock?.();
     // timeline: fade to black, then each line types and lingers
     let t = 1.4;
-    this.finaleStarts = FINALE_LINES.map((line) => {
+    this.finaleStarts = this.finaleLines.map((line) => {
       const start = t;
       t += line.length / MONOLOGUE_CPS + MONOLOGUE_HOLD;
       return start;
@@ -414,7 +469,7 @@ export class Game {
       if (seq >= this.finaleStarts[i]) current = i;
     }
     if (current >= 0) {
-      const line = FINALE_LINES[current];
+      const line = this.finaleLines[current];
       const chars = Math.floor((seq - this.finaleStarts[current]) * MONOLOGUE_CPS);
       this.osd.drawMonologue(line, chars);
     } else {
@@ -443,6 +498,8 @@ export class Game {
     if (this.state === "ended") return;
     this.state = "ended";
     this.touch?.setVisible(false);
+    this.ghostHud?.destroy();
+    this.ghostHud = null;
     // hold the final frame on tape for a beat before cutting
     await delay(350);
     const tape = await this.recorder.stop();
@@ -456,6 +513,11 @@ export class Game {
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.postfx.setSize(window.innerWidth, window.innerHeight);
   }
+}
+
+function levelIndexByName(name: string): number {
+  const i = LEVELS.findIndex((l) => l.name === name);
+  return i >= 0 ? i : 0;
 }
 
 function shortestAngle(from: number, to: number): number {

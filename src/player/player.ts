@@ -87,6 +87,32 @@ export class Player {
     this.swayTime += dt;
   }
 
+  /**
+   * Ghost mode: the body is driven by a recorded trajectory instead of input.
+   * Keeps the bob/sway/footstep life so the camera still feels held.
+   */
+  ghostMove(x: number, z: number, yaw: number, dt: number): void {
+    const dx = x - this.position.x;
+    const dz = z - this.position.z;
+    const speed = dt > 0 ? Math.hypot(dx, dz) / dt : 0;
+    this.position.x = x;
+    this.position.z = z;
+    this.yaw = yaw;
+    this.lastSpeed = speed;
+    this.speedNorm = Math.min(1, speed / SPRINT_SPEED);
+    if (speed > 0.2) {
+      this.strideAccum += speed * dt;
+      this.bobPhase += dt * (speed * 2.4);
+      if (this.strideAccum >= STRIDE) {
+        this.strideAccum -= STRIDE;
+        this.onFootstep?.(0.6 + this.speedNorm * 0.5);
+      }
+    } else {
+      this.bobPhase *= Math.max(0, 1 - dt * 6);
+    }
+    this.swayTime += dt;
+  }
+
   /** Applies position + handheld camcorder feel to the camera. */
   applyToCamera(camera: THREE.PerspectiveCamera): void {
     const bobAmp = 0.024 + this.speedNorm * 0.05;

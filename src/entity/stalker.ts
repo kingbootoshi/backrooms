@@ -170,6 +170,38 @@ export class Stalker {
     this.mesh.position.copy(this.position);
   }
 
+  /**
+   * Ghost mode: position driven by a recorded trajectory. Keeps the twitch
+   * animation and footfalls; faces its direction of travel toward the player.
+   */
+  ghostSet(x: number, z: number, visible: boolean, playerPos: THREE.Vector3, dt: number): void {
+    if (!visible) {
+      this.mesh.visible = false;
+      this.threat = 0;
+      return;
+    }
+    const moved = Math.hypot(x - this.position.x, z - this.position.z);
+    this.position.set(x, 0, z);
+    this.strideAccum += moved;
+    const dx = playerPos.x - x;
+    const dz = playerPos.z - z;
+    const dist = Math.hypot(dx, dz);
+    this.mesh.rotation.y = THREE.MathUtils.damp(this.mesh.rotation.y, Math.atan2(dx, dz), 8, dt);
+    this.threat = THREE.MathUtils.clamp(1 - dist / 30, 0, 1);
+    if (this.strideAccum >= STRIDE) {
+      this.strideAccum -= STRIDE;
+      const vol = THREE.MathUtils.clamp(1 - dist / 34, 0, 1);
+      if (vol > 0.02 && dist > 1e-3) {
+        const toEntity = new THREE.Vector3(-dx / dist, 0, -dz / dist);
+        const right = new THREE.Vector3(Math.cos(this.mesh.rotation.y), 0, -Math.sin(this.mesh.rotation.y));
+        this.onStep?.(vol, right.dot(toEntity));
+      }
+    }
+    this.mesh.visible = true;
+    this.animate(dt);
+    this.mesh.position.copy(this.position);
+  }
+
   // ---- glimpse mode ----------------------------------------------------------
 
   /** It only watches. Appears far off with line of sight, vanishes up close. */

@@ -1,5 +1,6 @@
 import { AudioEngine } from "./audio/audio";
 import { Game, type EndReason } from "./game";
+import { loadGhostTape, type GhostTape } from "./replay/ghost";
 
 // samples begin downloading the moment the page opens
 const audio = new AudioEngine();
@@ -23,6 +24,31 @@ const SECRET_WORDS = ["ALMONDWATER", "CARPETJUICE", "DRYWALLMILK", "HUMMINGYELLO
 let game: Game | null = null;
 let tapeUrl: string | null = null;
 let tapeExt = "webm";
+let ghostTape: GhostTape | null = null;
+
+// ?replay=lobby | dark-win | dark-death | <url> - watch the RL agent's run
+// inside the real renderer. Same seed, same maze, machine at the wheel.
+const replayParam = new URLSearchParams(location.search).get("replay");
+if (replayParam) {
+  loadGhostTape(replayParam)
+    .then((tape) => {
+      ghostTape = tape;
+      const title = document.querySelector("#start-overlay h1");
+      const meta = document.querySelector(".tape-meta");
+      if (title) title.textContent = "MACHINE TAPE";
+      if (meta) {
+        meta.innerHTML =
+          `recovered trajectory &mdash; neural pilot, ${tape.outcome === "death" ? "did not survive" : "made it out"}<br />` +
+          "no human input &mdash; the policy drives, you watch<br />" +
+          "headphones recommended";
+      }
+      startBtn.textContent = "▶ PLAY MACHINE TAPE";
+    })
+    .catch(() => {
+      const meta = document.querySelector(".tape-meta");
+      if (meta) meta.innerHTML = "machine tape not found &mdash; starting a normal run instead";
+    });
+}
 
 // phones get thumb-control instructions instead of WASD
 if (window.matchMedia("(pointer: coarse)").matches) {
@@ -37,7 +63,7 @@ if (window.matchMedia("(pointer: coarse)").matches) {
 
 startBtn.addEventListener("click", () => {
   startOverlay.classList.add("hidden");
-  game = new Game(app, audio);
+  game = new Game(app, audio, ghostTape);
   game.onEnd = onEnd;
   game.start();
   pollPause();
@@ -61,7 +87,18 @@ function onEnd(reason: EndReason, tape: Blob): void {
   pauseOverlay.classList.add("hidden");
   endOverlay.classList.remove("hidden");
 
-  if (reason === "death") {
+  if (ghostTape) {
+    // machine runs earn no secret words - the raffle is for humans
+    if (reason === "death") {
+      endTitle.textContent = "PILOT TERMINATED";
+      endTitle.className = "death";
+      endSub.textContent = "the entity caught the neural net - its tape survives";
+    } else {
+      endTitle.textContent = "THE MACHINE GOT OUT";
+      endTitle.className = "escape";
+      endSub.textContent = "no human hands on this tape - watch the policy run";
+    }
+  } else if (reason === "death") {
     endTitle.textContent = "SIGNAL LOST";
     endTitle.className = "death";
     endSub.textContent = "the tape is all that remains - watch your final journey";
